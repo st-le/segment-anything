@@ -49,6 +49,7 @@ class SamAutomaticMaskGenerator:
         point_grids: Optional[List[np.ndarray]] = None,
         min_mask_region_area: int = 0,
         output_mode: str = "binary_mask",
+        return_logits: bool = False
     ) -> None:
         """
         Using a SAM model, generates masks for the entire image.
@@ -132,6 +133,7 @@ class SamAutomaticMaskGenerator:
         self.crop_n_points_downscale_factor = crop_n_points_downscale_factor
         self.min_mask_region_area = min_mask_region_area
         self.output_mode = output_mode
+        self.return_logits = return_logits
 
     @torch.no_grad()
     def generate(self, image: np.ndarray) -> List[Dict[str, Any]]:
@@ -189,6 +191,7 @@ class SamAutomaticMaskGenerator:
                 "point_coords": [mask_data["points"][idx].tolist()],
                 "stability_score": mask_data["stability_score"][idx].item(),
                 "crop_box": box_xyxy_to_xywh(mask_data["crop_boxes"][idx]).tolist(),
+                "mask_logits": mask_data["mask_logits"] if self.return_logits else None
             }
             curr_anns.append(ann)
 
@@ -289,6 +292,8 @@ class SamAutomaticMaskGenerator:
             iou_preds=iou_preds.flatten(0, 1),
             points=torch.as_tensor(points.repeat(masks.shape[1], axis=0)),
         )
+        if self.return_logits:
+            data["mask_logits"] = masks.flatten(0, 1)
         del masks
 
         # Filter by predicted IoU
