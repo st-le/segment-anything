@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import time
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -60,7 +61,26 @@ class SAM_Feature_Extractor:
     def set_image(self, img):
         self.img = img
 
+    def detect(self):
+        """ just an alias """
+        self.exemplar_based_detect()
+
+    def exemplar_based_detect(self):
+        """
+            Returns:
+                nn_masks : masks of detected instances
+        """
+        assert self.img is not None, 'need to provide an image first with set_image'        
+
+        self.extract_all_inst_feat()
+
+        # collect the nn masks
+        indices = self.train_query_exemplar_knn()
+        nn_masks = np.stack([self.all_inst_masks[id]['segmentation'] for id in indices[-1][1:]])
+        return nn_masks
+
     def get_exemplar_feat(self, points, point_labels):
+        assert self.img is not None
         img = self.img
         predictor = self.predictor
         predictor.set_image(img)
@@ -141,6 +161,14 @@ class SAM_Feature_Extractor:
 
         return indices
 
+def onclick(event):
+    global click_x, click_y
+    click_x = event.x
+    click_y = event.y
+    # print('%s click: button=%d, x=%d, y=%d, xdata=%f, ydata=%f' %
+    #       ('double' if event.dblclick else 'single', event.button,
+    #        event.x, event.y, event.xdata, event.ydata))
+
 def main():
     sfe = SAM_Feature_Extractor()
 
@@ -148,13 +176,6 @@ def main():
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     fig, ax = plt.subplots()
     ax.imshow(img)
-    def onclick(event):
-        global click_x, click_y
-        click_x = event.x
-        click_y = event.y
-        # print('%s click: button=%d, x=%d, y=%d, xdata=%f, ydata=%f' %
-        #       ('double' if event.dblclick else 'single', event.button,
-        #        event.x, event.y, event.xdata, event.ydata))
     cid = fig.canvas.mpl_connect('button_press_event', onclick)
     plt.show()
 
@@ -193,5 +214,163 @@ def main():
     plt.show()
     print('Done.')
 
+def state_loop(fun):
+    def loop(self, *args, **kwargs):
+        """ loop program here and wait to do a task """
+        self.state_enter()
+
+        # do tasks and state switching
+        fun(self, *args, **kwargs)
+
+        # possibly add a wait 
+        time.sleep(self.assets['sleep_dura'])
+
+        self.state_exit()
+        # back to state machine loop
+        self.sm.loop()        
+    return loop
+
+class State:
+    def __init__(self, name, actions=None):
+        self.name = name
+        self.actions = actions
+        
+        # assect dict. Asset can be anything e.g. class attributes, functions...
+        self.assets = {}
+        
+        # hold the state machine
+        self.sm = None 
+
+    # def loop(self):
+
+    def state_enter(self):
+        print('Entering state {}...'.format(self.name))
+
+    def state_exit(self):
+        print('Exiting state {}...'.format(self.name))
+
+class InspectState(State):
+    def __init__(self,name):
+        super().__init__(name)
+
+class WaitState(State):
+    def __init__(self, name):
+        super().__init__(name)
+        self.action_names = ['detect', 'set_image']
+
+    @state_loop
+    def loop(self, **kwargs):
+        trigger = kwargs['trigger_name']
+        self.assets = kwargs['assets']
+        self.sm = self.assets['state_machine']
+        self.img = self.assets['image']
+        if trigger == 'detect':
+            self.detect()
+        elif trigger == 'set_image':            
+            self.set_image(kwargs['image'])
+        else:
+            raise NameError('Task not support by WaitState')
+        
+        # time.sleep(self.assets['sleep_dura'])
+        # slf.sm.loop()e
+        
+    def detect(self):
+        if len(self.assets['predictor'].exemplar_feat_bank) == 0:
+            fig, ax = plt.subplots()
+            ax.imshow(self.img)
+            cid = fig.canvas.mpl_connect('button_press_event', onclick)
+            plt.show()
+
+            points = np.array([[click_x,click_y]])
+            print('click point:{}'.format(points))
+
+            point_labels = np.array([1])
+            box = np.array([[153,84,225,165]])
+            if self.assets['predictor'].img is None:
+                self.assets['predictor'].img = self.img
+            self.assets['extract_exemplar_feat'](points, point_labels) # a shared function
+
+            # switch state
+            self.sm.cur_state = self.assets['states']['WAIT']
+        else:
+            self.assets['predictor'].detect()
+
+            # switch state
+            self.sm.cur_state = self.assets['states']['INSPECT']
+
+    def set_image(self, img):
+        self.assets['predictor'].set_image(img)
+        
+        # switch state
+        self.sm.cur_state = self.assets['states']['WAIT']
+
+class StateMachine:
+    def __init__(self):
+        self.state_names = [] 
+        self.states = {}
+        self.cur_state = None
+        self.assets = {}
+
+    def loop(self):
+        self.cur_state.loop()
+
+StateFactory = {
+    'WAIT': WaitState,
+    'INSPECT': InspectState
+}
+
+class Exemplar_Detector_App(StateMachine):
+    def __init__(self):
+        """ 
+            a state machine app to define a workflow for the exemplar learner
+            for workflow, see link: shorturl.at/qEFO2
+        """
+        super().__init__()
+        self.state_names = ['WAIT', 'INSPECT'] 
+        self.states = {sn:StateFactory[sn](sn) for sn in self.state_names}
+
+        # prepare assets
+        sfe = SAM_Feature_Extractor()
+        self.assets['predictor'] = sfe
+        self.assets['states'] = self.states
+        self.assets['sleep_dura'] = 0.010  #sec
+        self.assets['state_machine'] = self
+        self.assets['extract_exemplar_feat'] = sfe.get_exemplar_feat
+
+        # switch state
+        self.cur_state = self.states['WAIT']
+        self.cur_state.assets = self.assets
+
+        self.image_dir = '/home/quocviet/Downloads/OSCD_val2017'
+
+    def loop(self):
+        """ master program loop """
+        canvas = np.random.randint(0,255,(640,480),dtype=np.uint8)
+        img_buffer = [g for g in glob.glob(os.path.join(self.image_dir,'*.jpg'))]
+        assert len(img_buffer) > 0
+        img_idx = -1 
+        while 1:
+            img_idx += 1
+            img = cv2.imread(img_buffer[img_idx])
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self.assets['image'] = img
+            cv2.imshow('Continuous Learner App', img)
+            c = cv2.waitKey(0)
+            c = chr(c)
+            if c.lower()=='q': 
+                print('Program exit...')
+                break
+            elif c.lower()=='d':
+                self.cur_state = self.states['WAIT']
+                self.cur_state.loop(trigger_name='detect', assets=self.assets)
+            elif c.lower()=='s':
+                self.cur_state = self.states['WAIT']
+                self.cur_state.loop(trigger_name='set_image', assets=self.assets, image=img)
+
+def main_app():
+    app = Exemplar_Detector_App()
+    app.loop()
+
 if __name__ == '__main__':
-    main()
+    # main()
+    main_app()
