@@ -39,12 +39,77 @@ def show_mask(mask, ax, rand_color=False):
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
     ax.imshow(mask_image)
 
-t0 = time.time()
-predictor = SamPredictor(build_sam(checkpoint="./sam_vit_h_4b8939.pth"))
-print('load model takes {} seconds'.format(time.time() - t0))
+class SAMfeatureExtractor:
+    def __init__(self):
+        t0 = time.time()
+        self.predictor = SamPredictor(build_sam(checkpoint="./sam_vit_h_4b8939.pth"))
+        print('load model takes {} seconds'.format(time.time() - t0))
+
+        self.img_embed = None
+
+    def get_exemplar_feat(self, img, points, point_labels):
+        predictor = self.predictor
+        predictor.set_image(img)
+        t0 = time.time()
+
+        """
+            1. extract exemplar features by a point-based prompt 
+            2. the predicted mask
+            3. use a spatial mean-pool to compute the feature vector
+        """
+
+        """ masks: full image-size mask
+        """
+        masks, _, _ = predictor.predict(point_coords=points,
+                                        point_labels=point_labels,
+                                        return_logits=True)
+        print('predict takes {} seconds'.format(time.time() - t0))
+        t0 = time.time()
+
+        """ img_embed shape (1, 256, 64, 64)
+        """
+        img_embed = predictor.get_image_embedding()#.cpu().numpy()
+        print('get_image_embedding takes {} seconds'.format(time.time() - t0))
+
+        # visualize the exemplar mask
+        plt.figure(figsize=(10,10))
+        plt.imshow(img)
+        show_mask(masks, plt.gca())
+        # plt.axis('on')
+        # plt.show()
+
+        masks_resize = F.interpolate(torch.tensor(masks).unsqueeze(0),img_embed.shape[-2:])
+        masks_resize_flat = torch.mean(masks_resize,dim=1)
+        masks_resize_flat_thr = masks_resize_flat > predictor.model.mask_threshold
+
+        # mask the embedding
+        msk_embed = masks_resize_flat_thr.unsqueeze(0) * img_embed
+        exemplar_feat = torch.mean(msk_embed, dim=[0,2,3])
+
+        self.img_embed = img_embed
+        return exemplar_feat
+
+sfe = SAMfeatureExtractor()
 
 img = cv2.imread(args.image_path)
-points = np.array([[225,94]])
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+fig, ax = plt.subplots()
+ax.imshow(img)
+click_x = 0 
+click_y = 0
+def onclick(event):
+    global click_x, click_y
+    click_x = event.x
+    click_y = event.y
+    # print('%s click: button=%d, x=%d, y=%d, xdata=%f, ydata=%f' %
+    #       ('double' if event.dblclick else 'single', event.button,
+    #        event.x, event.y, event.xdata, event.ydata))
+cid = fig.canvas.mpl_connect('button_press_event', onclick)
+plt.show()
+
+points = np.array([[click_x,click_y]])#np.array([[225,94]])
+print('click point:{}'.format(points))
+
 point_labels = np.array([1])
 box = np.array([[153,84,225,165]])
 
@@ -54,31 +119,10 @@ box = np.array([[153,84,225,165]])
 if args.use_crop:
     box0 = box[0,:]
     img = img[box0[1]:box0[3], box0[0]:box0[2], :]
-predictor.set_image(img)
-t0 = time.time()
-masks, _, _ = predictor.predict(point_coords=points,
-                                point_labels=point_labels,
-                                return_logits=True)
-print('predict takes {} seconds'.format(time.time() - t0))
-t0 = time.time()
-img_embed = predictor.get_image_embedding()#.cpu().numpy()
-print('get_image_embedding takes {} seconds'.format(time.time() - t0))
 
-# visualize the exemplar mask
-plt.figure(figsize=(10,10))
-plt.imshow(img)
-show_mask(masks, plt.gca())
-# plt.axis('on')
-# plt.show()
-
-masks_resize = F.interpolate(torch.tensor(masks).unsqueeze(0),img_embed.shape[-2:])
-masks_resize_flat = torch.mean(masks_resize,dim=1)
-masks_resize_flat_thr = masks_resize_flat > predictor.model.mask_threshold
-
-# mask the embedding
-msk_embed = masks_resize_flat_thr.unsqueeze(0) * img_embed
-exemplar_feat = torch.mean(msk_embed, dim=[0,2,3])
-
+exemplar_feat = sfe.get_exemplar_feat(img, points, point_labels)
+predictor = sfe.predictor
+img_embed = sfe.img_embed
 # detect all instances
 # sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 # sam.to(device=device)
