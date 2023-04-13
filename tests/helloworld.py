@@ -25,6 +25,9 @@ parser.add_argument("--image_path", type=str, required=False, default="/home/quo
 
 args = parser.parse_args()
 
+click_x = 0
+click_y = 0
+
 def show_mask(mask, ax, rand_color=False):
     if not rand_color:
         color = np.array([30/255, 144/255, 255/255, 0.6])
@@ -39,15 +42,20 @@ def show_mask(mask, ax, rand_color=False):
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
     ax.imshow(mask_image)
 
-class SAMfeatureExtractor:
+class SAM_Feature_Extractor:
     def __init__(self):
         t0 = time.time()
         self.predictor = SamPredictor(build_sam(checkpoint="./sam_vit_h_4b8939.pth"))
         print('load model takes {} seconds'.format(time.time() - t0))
 
+        self.mask_generator = SamAutomaticMaskGenerator(self.predictor.model, return_logits=True)
+
         self.img_embed = None
         self.exemplar_feat_bank = []
         self.img = None
+
+        self.all_inst_feats = []
+        self.all_inst_masks = None
 
     def set_image(self, img):
         self.img = img
@@ -96,80 +104,94 @@ class SAMfeatureExtractor:
         self.img_embed = img_embed
         self.exemplar_feat_bank.append(exemplar_feat)
         return exemplar_feat
+    
+    def extract_all_inst_feat(self):
+        img_embed = self.img_embed
+        predictor =self.predictor
+        t0 = time.time()
+        all_inst_masks = self.mask_generator.generate(self.img)
+        print('extract all instance masks take:{}'.format(time.time()-t0))
 
-sfe = SAMfeatureExtractor()
+        all_inst_feats = []
+        for id, m in enumerate(all_inst_masks):
+            m = all_inst_masks[0]['mask_logits'][id] #m['segmentation']
+            m_resize = F.interpolate(torch.tensor(m).unsqueeze(0).unsqueeze(0),img_embed.shape[-2:])
+            m_resize_thr = m_resize > predictor.model.mask_threshold
 
-img = cv2.imread(args.image_path)
-img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-fig, ax = plt.subplots()
-ax.imshow(img)
-click_x = 0 
-click_y = 0
-def onclick(event):
-    global click_x, click_y
-    click_x = event.x
-    click_y = event.y
-    # print('%s click: button=%d, x=%d, y=%d, xdata=%f, ydata=%f' %
-    #       ('double' if event.dblclick else 'single', event.button,
-    #        event.x, event.y, event.xdata, event.ydata))
-cid = fig.canvas.mpl_connect('button_press_event', onclick)
-plt.show()
+            # mask the embedding for the instance
+            inst_msk_embed = m_resize_thr * img_embed
+            inst_feat = torch.mean(inst_msk_embed, dim=[0,2,3])
+            all_inst_feats.append(inst_feat.numpy())
+        self.all_inst_feats = all_inst_feats
+        self.all_inst_masks = all_inst_masks
 
-points = np.array([[click_x,click_y]])#np.array([[225,94]])
-print('click point:{}'.format(points))
+    def train_query_exemplar_knn(self, k=30):
+        for f in self.exemplar_feat_bank:
+            self.all_inst_feats.append(f.numpy())
+        X = np.stack(self.all_inst_feats)
 
-point_labels = np.array([1])
-box = np.array([[153,84,225,165]])
+        t0 = time.time()
+        kdt = KDTree(X, leaf_size=30, metric='euclidean')
+        print('build kdtree takes: {}'.format(time.time()-t0))
 
-""" the exemplar's feature is extracted from the crop box, namely, crop -> feature extract
-    instead of feature extract (the whole image) -> crop the feature map
-"""
-if args.use_crop:
-    box0 = box[0,:]
-    img = img[box0[1]:box0[3], box0[0]:box0[2], :]
+        t0 = time.time()
+        indices = kdt.query(X, k=k, return_distance=False)
+        print('query kdtree takes:{}'.format(time.time()-t0))
+        # print('nn indices:{}'.format(indices))
 
-sfe.set_image(img)
-exemplar_feat = sfe.get_exemplar_feat(points, point_labels)
-predictor = sfe.predictor
-img_embed = sfe.img_embed
-# detect all instances
-# sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-# sam.to(device=device)
-t0 = time.time()
-# predictor.model.to('cuda')  # OOM
-print('to device takes:{}'.format(time.time()-t0))
-t0 = time.time()
-mask_generator = SamAutomaticMaskGenerator(predictor.model, return_logits=True)
-all_inst_masks = mask_generator.generate(img)
-print('extract all instance masks take:{}'.format(time.time()-t0))
+        return indices
 
-all_inst_feats = []
-for id, m in enumerate(all_inst_masks):
-    m = all_inst_masks[0]['mask_logits'][id] #m['segmentation']
-    m_resize = F.interpolate(torch.tensor(m).unsqueeze(0).unsqueeze(0),img_embed.shape[-2:])
-    m_resize_thr = m_resize > predictor.model.mask_threshold
+def main():
+    sfe = SAM_Feature_Extractor()
 
-    # mask the embedding for the instance
-    inst_msk_embed = m_resize_thr * img_embed
-    inst_feat = torch.mean(inst_msk_embed, dim=[0,2,3])
-    all_inst_feats.append(inst_feat.numpy())
-all_inst_feats.append(exemplar_feat.numpy())
-X = np.stack(all_inst_feats)
+    img = cv2.imread(args.image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    fig, ax = plt.subplots()
+    ax.imshow(img)
+    def onclick(event):
+        global click_x, click_y
+        click_x = event.x
+        click_y = event.y
+        # print('%s click: button=%d, x=%d, y=%d, xdata=%f, ydata=%f' %
+        #       ('double' if event.dblclick else 'single', event.button,
+        #        event.x, event.y, event.xdata, event.ydata))
+    cid = fig.canvas.mpl_connect('button_press_event', onclick)
+    plt.show()
 
-t0 = time.time()
-kdt = KDTree(X, leaf_size=30, metric='euclidean')
-print('build kdtree takes: {}'.format(time.time()-t0))
+    points = np.array([[click_x,click_y]])#np.array([[225,94]])
+    print('click point:{}'.format(points))
 
-t0 = time.time()
-indices = kdt.query(X, k=30, return_distance=False)
-print('query kdtree takes:{}'.format(time.time()-t0))
-# print('nn indices:{}'.format(indices))
+    point_labels = np.array([1])
+    box = np.array([[153,84,225,165]])
 
-# collect the nn masks
-nn_masks = np.stack([all_inst_masks[id]['segmentation'] for id in indices[-1][1:]])
-for i in range(nn_masks.shape[0]):
-    show_mask(nn_masks[i], plt.gca())
-plt.axis('on')
-plt.show()
-print('Done.')
+    """ the exemplar's feature is extracted from the crop box, namely, crop -> feature extract
+        instead of feature extract (the whole image) -> crop the feature map
+    """
+    if args.use_crop:
+        box0 = box[0,:]
+        img = img[box0[1]:box0[3], box0[0]:box0[2], :]
 
+    sfe.set_image(img)
+    exemplar_feat = sfe.get_exemplar_feat(points, point_labels)
+    predictor = sfe.predictor
+    img_embed = sfe.img_embed
+    # detect all instances
+    # sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+    # sam.to(device=device)
+    t0 = time.time()
+    # predictor.model.to('cuda')  # OOM
+    print('to device takes:{}'.format(time.time()-t0))
+
+    sfe.extract_all_inst_feat()
+
+    # collect the nn masks
+    indices = sfe.train_query_exemplar_knn()
+    nn_masks = np.stack([sfe.all_inst_masks[id]['segmentation'] for id in indices[-1][1:]])
+    for i in range(nn_masks.shape[0]):
+        show_mask(nn_masks[i], plt.gca())
+    plt.axis('on')
+    plt.show()
+    print('Done.')
+
+if __name__ == '__main__':
+    main()
