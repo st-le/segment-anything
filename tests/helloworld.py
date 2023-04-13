@@ -46,10 +46,17 @@ class SAMfeatureExtractor:
         print('load model takes {} seconds'.format(time.time() - t0))
 
         self.img_embed = None
+        self.exemplar_feat_bank = []
+        self.img = None
 
-    def get_exemplar_feat(self, img, points, point_labels):
+    def set_image(self, img):
+        self.img = img
+
+    def get_exemplar_feat(self, points, point_labels):
+        img = self.img
         predictor = self.predictor
         predictor.set_image(img)
+        
         t0 = time.time()
 
         """
@@ -87,6 +94,7 @@ class SAMfeatureExtractor:
         exemplar_feat = torch.mean(msk_embed, dim=[0,2,3])
 
         self.img_embed = img_embed
+        self.exemplar_feat_bank.append(exemplar_feat)
         return exemplar_feat
 
 sfe = SAMfeatureExtractor()
@@ -120,7 +128,8 @@ if args.use_crop:
     box0 = box[0,:]
     img = img[box0[1]:box0[3], box0[0]:box0[2], :]
 
-exemplar_feat = sfe.get_exemplar_feat(img, points, point_labels)
+sfe.set_image(img)
+exemplar_feat = sfe.get_exemplar_feat(points, point_labels)
 predictor = sfe.predictor
 img_embed = sfe.img_embed
 # detect all instances
