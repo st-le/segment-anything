@@ -28,6 +28,7 @@ args = parser.parse_args()
 
 click_x = 0
 click_y = 0
+press_key = None
 
 def show_mask(mask, ax, rand_color=False):
     if not rand_color:
@@ -63,7 +64,7 @@ class SAM_Feature_Extractor:
 
     def detect(self):
         """ just an alias """
-        self.exemplar_based_detect()
+        return self.exemplar_based_detect()
 
     def exemplar_based_detect(self):
         """
@@ -161,6 +162,12 @@ class SAM_Feature_Extractor:
 
         return indices
 
+def on_press(event):
+    print('press', event.key)
+    sys.stdout.flush()
+    global press_key
+    press_key = event.key
+
 def onclick(event):
     global click_x, click_y
     click_x = event.x
@@ -220,14 +227,13 @@ def state_loop(fun):
         self.state_enter()
 
         # do tasks and state switching
-        fun(self, *args, **kwargs)
+        self.assets = fun(self, *args, **kwargs)
 
         # possibly add a wait 
         time.sleep(self.assets['sleep_dura'])
 
         self.state_exit()
         # back to state machine loop
-        self.sm.loop()        
     return loop
 
 class State:
@@ -253,6 +259,56 @@ class InspectState(State):
     def __init__(self,name):
         super().__init__(name)
 
+    @state_loop
+    def loop(self, **kwargs):
+
+        # show the result & get the feedback key
+        fig, ax = plt.subplots()
+        fig.canvas.mpl_connect('key_press_event', on_press)
+
+        ax.imshow(self.assets['image'])
+        ax.text(20, 20, "The segment is good enough (y/n)?")
+
+        nn_masks = self.assets['segment_results']
+        for i in range(nn_masks.shape[0]):
+            show_mask(nn_masks[i], plt.gca())
+        plt.axis('on')
+        plt.show()
+
+        global press_key
+        if press_key.lower() == 'y':
+            # switch state
+            self.sm.cur_state = self.assets['states']['WAIT']
+
+        elif press_key.lower() == 'n':
+            extract_exemplar_feat_userinput(self)
+            self.sm.cur_state = self.assets['states']['WAIT']  # switch state
+
+        else:
+            print("Key not support. Consider the answer was 'y'")
+            # switch state
+            self.sm.cur_state = self.assets['states']['WAIT']
+
+        return self.assets
+
+
+def extract_exemplar_feat_userinput(state):
+    print('Please click the point to extract the exemplar feature')
+    fig, ax = plt.subplots()
+    ax.imshow(state.img)
+    cid = fig.canvas.mpl_connect('button_press_event', onclick)
+    plt.show()
+
+    points = np.array([[click_x,click_y]])
+    print('click point:{}'.format(points))
+
+    point_labels = np.array([1])
+    box = np.array([[153,84,225,165]])
+    if state.assets['predictor'].img is None:
+        state.assets['predictor'].img = state.img
+    state.assets['extract_exemplar_feat'](points, point_labels) # a shared function
+    return state.assets
+
 class WaitState(State):
     def __init__(self, name):
         super().__init__(name)
@@ -272,28 +328,30 @@ class WaitState(State):
             raise NameError('Task not support by WaitState')
         
         # time.sleep(self.assets['sleep_dura'])
-        # slf.sm.loop()e
+        return self.assets
         
     def detect(self):
         if len(self.assets['predictor'].exemplar_feat_bank) == 0:
-            fig, ax = plt.subplots()
-            ax.imshow(self.img)
-            cid = fig.canvas.mpl_connect('button_press_event', onclick)
-            plt.show()
+            # fig, ax = plt.subplots()
+            # ax.imshow(self.img)
+            # cid = fig.canvas.mpl_connect('button_press_event', onclick)
+            # plt.show()
 
-            points = np.array([[click_x,click_y]])
-            print('click point:{}'.format(points))
+            # points = np.array([[click_x,click_y]])
+            # print('click point:{}'.format(points))
 
-            point_labels = np.array([1])
-            box = np.array([[153,84,225,165]])
-            if self.assets['predictor'].img is None:
-                self.assets['predictor'].img = self.img
-            self.assets['extract_exemplar_feat'](points, point_labels) # a shared function
+            # point_labels = np.array([1])
+            # box = np.array([[153,84,225,165]])
+            # if self.assets['predictor'].img is None:
+            #     self.assets['predictor'].img = self.img
+            # self.assets['extract_exemplar_feat'](points, point_labels) # a shared function
+            self.assets = extract_exemplar_feat_userinput(self)
 
             # switch state
             self.sm.cur_state = self.assets['states']['WAIT']
         else:
-            self.assets['predictor'].detect()
+            nn_masks = self.assets['predictor'].detect()
+            self.assets['segment_results'] = nn_masks
 
             # switch state
             self.sm.cur_state = self.assets['states']['INSPECT']
@@ -352,9 +410,11 @@ class Exemplar_Detector_App(StateMachine):
         while 1:
             img_idx += 1
             img = cv2.imread(img_buffer[img_idx])
+            img_bgr = img.copy()
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self.assets['image'] = img
-            cv2.imshow('Continuous Learner App', img)
+            print('\ninput keys: q to quit, d to detect, s to set image')
+            cv2.imshow('Continuous Learner App', img_bgr)
             c = cv2.waitKey(0)
             c = chr(c)
             if c.lower()=='q': 
@@ -366,6 +426,7 @@ class Exemplar_Detector_App(StateMachine):
             elif c.lower()=='s':
                 self.cur_state = self.states['WAIT']
                 self.cur_state.loop(trigger_name='set_image', assets=self.assets, image=img)
+            print('Returned to main app loop...')
 
 def main_app():
     app = Exemplar_Detector_App()
