@@ -28,7 +28,7 @@ args = parser.parse_args()
 
 click_x = 0
 click_y = 0
-press_key = None
+press_key = 'n'
 
 def show_mask(mask, ax, rand_color=False):
     if not rand_color:
@@ -43,6 +43,7 @@ def show_mask(mask, ax, rand_color=False):
     h, w = mask.shape[-2:]
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
     ax.imshow(mask_image)
+    return ax
 
 class SAM_Feature_Extractor:
     def __init__(self):
@@ -80,7 +81,7 @@ class SAM_Feature_Extractor:
         nn_masks = np.stack([self.all_inst_masks[id]['segmentation'] for id in indices[-1][1:]])
         return nn_masks
 
-    def get_exemplar_feat(self, points, point_labels):
+    def get_exemplar_feat(self, points, point_labels): # ax=None
         assert self.img is not None
         img = self.img
         predictor = self.predictor
@@ -108,9 +109,22 @@ class SAM_Feature_Extractor:
         print('get_image_embedding takes {} seconds'.format(time.time() - t0))
 
         # visualize the exemplar mask
-        plt.figure(figsize=(10,10))
-        plt.imshow(img)
-        show_mask(masks, plt.gca())
+        fig = plt.gcf()
+        ax = fig.axes[0] if len(fig.axes) > 0 else fig.add_subplot()
+        ax.imshow(img)
+        show_mask(masks, ax)
+        plt.show()
+        # if ax is None:
+        #     fig = plt.figure(figsize=(10,10))
+        #     aximg = plt.imshow(img)
+        #     aximg.ax = show_mask(masks, aximg.ax) # plt.gca()
+        # else:
+        #     ax.imshow(img)
+        #     ax = show_mask(masks, ax)
+        # if ax is None:
+        #     self.plots = {'fig': fig, 'ax': aximg.ax}
+        # else:
+        #     self.plots = {'fig': None, 'ax': ax}
         # plt.axis('on')
         # plt.show()
 
@@ -156,6 +170,8 @@ class SAM_Feature_Extractor:
         print('build kdtree takes: {}'.format(time.time()-t0))
 
         t0 = time.time()
+        while k > X.shape[0]:
+            k = int(k / 2)
         indices = kdt.query(X, k=k, return_distance=False)
         print('query kdtree takes:{}'.format(time.time()-t0))
         # print('nn indices:{}'.format(indices))
@@ -172,6 +188,7 @@ def onclick(event):
     global click_x, click_y
     click_x = event.x
     click_y = event.y
+    print('[onclick] click point:{}'.format((click_x, click_y)))
     # print('%s click: button=%d, x=%d, y=%d, xdata=%f, ydata=%f' %
     #       ('double' if event.dblclick else 'single', event.button,
     #        event.x, event.y, event.xdata, event.ydata))
@@ -223,17 +240,19 @@ def main():
 
 def state_loop(fun):
     def loop(self, *args, **kwargs):
-        """ loop program here and wait to do a task """
-        self.state_enter()
+        if self.assets['terminate'] == 0: 
+            """ loop program here and wait to do a task """
+            self.state_enter()
 
-        # do tasks and state switching
-        self.assets = fun(self, *args, **kwargs)
+            # do tasks and state switching
+            self.assets = fun(self, *args, **kwargs)
 
-        # possibly add a wait 
-        time.sleep(self.assets['sleep_dura'])
+            # possibly add a wait 
+            time.sleep(self.assets['sleep_dura'])
 
-        self.state_exit()
-        # back to state machine loop
+            self.state_exit()
+            # back to state machine loop
+        return self.assets            
     return loop
 
 class State:
@@ -245,9 +264,12 @@ class State:
         self.assets = {}
         
         # hold the state machine
-        self.sm = None 
+        self.sm = self.sm() #None 
 
     # def loop(self):
+
+    def sm(self):
+        return self.assets['state_machine'] if hasattr(self, 'assets') and 'state_machine' in self.assets else None
 
     def state_enter(self):
         print('Entering state {}...'.format(self.name))
@@ -263,7 +285,19 @@ class InspectState(State):
     def loop(self, **kwargs):
 
         # show the result & get the feedback key
-        fig, ax = plt.subplots()
+        # if self.assets['plots'] is None or 'plots' not in self.assets or self.assets['plots']['fig'] is None or self.assets['plots']['ax'] is None:
+        #     if self.assets['plots'] is None:
+        #         fig, ax = plt.subplots()
+        #     elif self.assets['plots']['ax'] is None:
+        #         raise ValueError('ax cannot be None')
+        #     else:
+        #         fig = self.assets['plots']['fig'] if self.assets['plots']['fig'] is not None else plt.gcf()
+        #         ax = self.assets['plots']['ax']
+        # else:
+        #     fig, ax = list(self.assets['plots'].values())
+        fig = plt.gcf()
+        ax = fig.axes[0] if len(fig.axes) > 0 else fig.add_subplot()
+
         fig.canvas.mpl_connect('key_press_event', on_press)
 
         ax.imshow(self.assets['image'])
@@ -271,17 +305,21 @@ class InspectState(State):
 
         nn_masks = self.assets['segment_results']
         for i in range(nn_masks.shape[0]):
-            show_mask(nn_masks[i], plt.gca())
-        plt.axis('on')
+            ax = show_mask(nn_masks[i], ax) # plt.gca()
+        # plt.axis('on')
         plt.show()
+        # plt.waitforbuttonpress()
 
         global press_key
+        if not hasattr(self,'sm') or self.sm is None:
+            self.sm = self.assets['state_machine']
+
         if press_key.lower() == 'y':
             # switch state
             self.sm.cur_state = self.assets['states']['WAIT']
 
         elif press_key.lower() == 'n':
-            extract_exemplar_feat_userinput(self)
+            self.assets = extract_exemplar_feat_userinput(self)
             self.sm.cur_state = self.assets['states']['WAIT']  # switch state
 
         else:
@@ -289,24 +327,45 @@ class InspectState(State):
             # switch state
             self.sm.cur_state = self.assets['states']['WAIT']
 
+        # self.assets['plots'] = {'fig': fig, 'ax': ax}
+        self.assets['state_machine'] = self.sm
         return self.assets
 
 
 def extract_exemplar_feat_userinput(state):
     print('Please click the point to extract the exemplar feature')
-    fig, ax = plt.subplots()
+    # if state.assets['plots'] is None or 'plots' not in state.assets or state.assets['plots']['fig'] is None or state.assets['plots']['ax'] is None:
+    #     if state.assets['plots'] is None:
+    #         fig, ax = plt.subplots()
+    #     elif state.assets['plots']['ax'] is None:
+    #         raise ValueError('ax cannot be None')
+    #     else:
+    #         fig = state.assets['plots']['fig'] if state.assets['plots']['fig'] is not None else plt.gcf()
+    #         ax = state.assets['plots']['ax']
+    # else:
+    #     fig, ax = list(state.assets['plots'].values())
+    fig = plt.gcf()
+    # initialize an axes of the fig
+    ax = fig.axes[0] if len(fig.axes) > 0 else fig.add_subplot()
+    if not hasattr(state,'img'):
+        if "image" in state.assets:
+            state.img = state.assets['image']
+        else:
+            raise ValueError("No image in the state assets")
     ax.imshow(state.img)
     cid = fig.canvas.mpl_connect('button_press_event', onclick)
     plt.show()
+    # plt.waitforbuttonpress()
 
     points = np.array([[click_x,click_y]])
     print('click point:{}'.format(points))
 
     point_labels = np.array([1])
     box = np.array([[153,84,225,165]])
-    if state.assets['predictor'].img is None:
-        state.assets['predictor'].img = state.img
+    state.assets['predictor'].img = state.img
+    
     state.assets['extract_exemplar_feat'](points, point_labels) # a shared function
+    # state.assets['plots'] = state.assets['predictor'].plots
     return state.assets
 
 class WaitState(State):
@@ -316,18 +375,32 @@ class WaitState(State):
 
     @state_loop
     def loop(self, **kwargs):
-        trigger = kwargs['trigger_name']
-        self.assets = kwargs['assets']
+
+        img_buffer = self.assets['img_buffer']
+        img_idx = self.assets['img_idx']
         self.sm = self.assets['state_machine']
+
+        img_idx += 1
+        img = cv2.imread(img_buffer[img_idx])
+        img_bgr = img.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        self.assets['image'] = img
+
         self.img = self.assets['image']
-        if trigger == 'detect':
+        print('\ninput keys: q to quit, d to detect, s to set image')
+        cv2.imshow('Continuous Learner App', img_bgr)
+        c = cv2.waitKey(0)
+        c = chr(c)
+        if c.lower()=='q': 
+            print('Program exit...')
+            self.assets['terminate'] = 1
+        elif c.lower()=='d':
             self.detect()
-        elif trigger == 'set_image':            
-            self.set_image(kwargs['image'])
-        else:
-            raise NameError('Task not support by WaitState')
-        
-        # time.sleep(self.assets['sleep_dura'])
+        elif c.lower()=='s':
+            self.set_image(self.img)
+
+        self.assets['img_idx'] = img_idx
+        self.assets['state_machine'] = self.sm
         return self.assets
         
     def detect(self):
@@ -350,6 +423,8 @@ class WaitState(State):
             # switch state
             self.sm.cur_state = self.assets['states']['WAIT']
         else:
+            self.assets['predictor'].set_image(self.img)
+
             nn_masks = self.assets['predictor'].detect()
             self.assets['segment_results'] = nn_masks
 
@@ -370,7 +445,9 @@ class StateMachine:
         self.assets = {}
 
     def loop(self):
-        self.cur_state.loop()
+        while not self.assets['terminate']:
+            self.cur_state.assets = self.assets
+            self.assets = self.cur_state.loop()
 
 StateFactory = {
     'WAIT': WaitState,
@@ -394,39 +471,22 @@ class Exemplar_Detector_App(StateMachine):
         self.assets['sleep_dura'] = 0.010  #sec
         self.assets['state_machine'] = self
         self.assets['extract_exemplar_feat'] = sfe.get_exemplar_feat
-
-        # switch state
-        self.cur_state = self.states['WAIT']
-        self.cur_state.assets = self.assets
+        # self.assets['plots'] = None
 
         self.image_dir = '/home/quocviet/Downloads/OSCD_val2017'
 
-    def loop(self):
-        """ master program loop """
-        canvas = np.random.randint(0,255,(640,480),dtype=np.uint8)
         img_buffer = [g for g in glob.glob(os.path.join(self.image_dir,'*.jpg'))]
         assert len(img_buffer) > 0
-        img_idx = -1 
-        while 1:
-            img_idx += 1
-            img = cv2.imread(img_buffer[img_idx])
-            img_bgr = img.copy()
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            self.assets['image'] = img
-            print('\ninput keys: q to quit, d to detect, s to set image')
-            cv2.imshow('Continuous Learner App', img_bgr)
-            c = cv2.waitKey(0)
-            c = chr(c)
-            if c.lower()=='q': 
-                print('Program exit...')
-                break
-            elif c.lower()=='d':
-                self.cur_state = self.states['WAIT']
-                self.cur_state.loop(trigger_name='detect', assets=self.assets)
-            elif c.lower()=='s':
-                self.cur_state = self.states['WAIT']
-                self.cur_state.loop(trigger_name='set_image', assets=self.assets, image=img)
-            print('Returned to main app loop...')
+        self.assets['img_buffer'] = img_buffer
+        self.assets['img_idx'] = -1
+
+        # terminate variable for the whole state machine
+        self.assets['terminate'] = 0
+
+        # switch state
+        self.cur_state = self.states['WAIT']       
+
+        self.loop()
 
 def main_app():
     app = Exemplar_Detector_App()
