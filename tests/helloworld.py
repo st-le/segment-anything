@@ -78,7 +78,12 @@ class SAM_Feature_Extractor:
 
         # collect the nn masks
         indices = self.train_query_exemplar_knn()
-        nn_masks = np.stack([self.all_inst_masks[id]['segmentation'] for id in indices[-1][1:]])
+        indices[-1].sort()
+        if len(self.exemplar_feat_bank) == 0:
+            indices_no_exemplar = indices[-1]
+        else:
+            indices_no_exemplar = indices[-1][:-len(self.exemplar_feat_bank)]
+        nn_masks = np.stack([self.all_inst_masks[id]['segmentation'] for id in indices_no_exemplar])
         return nn_masks
 
     def get_exemplar_feat(self, points, point_labels): # ax=None
@@ -347,11 +352,8 @@ def extract_exemplar_feat_userinput(state):
     fig = plt.gcf()
     # initialize an axes of the fig
     ax = fig.axes[0] if len(fig.axes) > 0 else fig.add_subplot()
-    if not hasattr(state,'img'):
-        if "image" in state.assets:
-            state.img = state.assets['image']
-        else:
-            raise ValueError("No image in the state assets")
+    assert "image" in state.assets, "No image in the state assets"
+    state.img = state.assets['image']
     ax.imshow(state.img)
     cid = fig.canvas.mpl_connect('button_press_event', onclick)
     plt.show()
